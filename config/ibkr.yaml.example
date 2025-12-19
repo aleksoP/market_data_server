@@ -1,0 +1,6 @@
+ibkr:
+  host: "127.0.0.1"
+  port: 4002          # paper gateway default; change if needed
+  client_id: 11
+  account: ""         # optional, can be auto-detected
+  readonly: true

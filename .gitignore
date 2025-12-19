@@ -1,0 +1,36 @@
+# Python
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+.venv/
+venv/
+venvs/
+
+# OS / Editor
+.DS_Store
+.idea/
+.vscode/
+
+# Logs & runtime
+logs/
+*.log
+
+# Data (NEVER COMMIT)
+data/
+*.parquet
+*.csv
+*.feather
+
+# Secrets
+config/*.secret.yaml
+config/*_private.yaml
+config/credentials.yaml
+
+# IB Gateway / Java
+Jts/
+IBGateway/
+*.jar
+
+# System
+*.swp
