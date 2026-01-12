@@ -1,0 +1,18 @@
+bars:
+  bar_size: "1 min"
+  what_to_show: "TRADES"
+  use_rth: false
+
+ibkr:
+  host: "127.0.0.1"
+  port: 4002
+
+universe:
+  - symbol: "AAPL"
+    secType: "STK"
+    exchange: "SMART"
+    currency: "USD"
+  - symbol: "MSFT"
+    secType: "STK"
+    exchange: "SMART"
+    currency: "USD"

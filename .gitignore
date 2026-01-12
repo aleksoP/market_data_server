@@ -16,11 +16,10 @@ venvs/
 logs/
 *.log
 
-# Data (NEVER COMMIT)
-data/
-*.parquet
-*.csv
-*.feather
+# Data (NEVER COMMIT) - ignore only repo-root /data, not src/data
+/data/
+!/src/
+!/src/data/
 
 # Secrets
 config/*.secret.yaml
