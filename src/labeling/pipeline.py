@@ -38,16 +38,24 @@ def build_label_partitions(
     cfg: LabelConfig,
     out_root: Path = Path("data/labels_1m"),
     tb_vol_col: str = "vol_logret_60",
+    skip_existing: bool = True,
+    force_days: set[str] | None = None,
 ) -> None:
     days = pd.date_range(start=start, end=end, freq="D")
     lb = cfg.lookback_bars
     la = cfg.lookahead_bars
+    force_days = force_days or set()
 
     for sym in symbols:
         logger.info("Labels: symbol=%s", sym)
 
         for d in days:
             day = d.date().isoformat()
+
+            out_path = out_root / f"symbol={sym}" / f"date={day}" / "labels.parquet"
+            if skip_existing and out_path.exists() and day not in force_days:
+                continue
+
             day_start = pd.Timestamp(day, tz="UTC")
             day_end = day_start + pd.Timedelta(days=1)
 
@@ -58,13 +66,9 @@ def build_label_partitions(
             if bars.empty:
                 continue
 
-            # Ensure the vol column exists for triple-barrier (computed using ONLY past bars)
             bars = add_technical_features(bars, vol_windows=list(cfg.vol_windows), atr_window=cfg.atr_window)
 
-            # Build forward returns on the *full* frame, then slice to day
             y_fwd = build_forward_returns(bars, horizons=list(cfg.fwd_horizons)).reset_index()
-
-            # Triple barrier on full frame, slice to day
             y_tb = triple_barrier_labels(
                 bars_long=bars,
                 vol_col=tb_vol_col,
@@ -75,14 +79,12 @@ def build_label_partitions(
 
             y = y_fwd.merge(y_tb, on=["timestamp_utc", "symbol"], how="outer")
 
-            # Keep only rows in this day
             y["timestamp_utc"] = pd.to_datetime(y["timestamp_utc"], utc=True)
             mask = (y["timestamp_utc"] >= day_start) & (y["timestamp_utc"] < day_end)
             out = y.loc[mask].copy()
             if out.empty:
                 continue
 
-            out_path = out_root / f"symbol={sym}" / f"date={day}" / "labels.parquet"
             atomic_write_parquet(out, out_path)
 
     logger.info("Labels partitions complete: %s", out_root)

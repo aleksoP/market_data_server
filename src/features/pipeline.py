@@ -44,6 +44,8 @@ def build_feature_partitions(
     end: str,
     cfg: FeatureConfig,
     out_root: Path = Path("data/features_1m"),
+    skip_existing: bool = True,
+    force_days: set[str] | None = None,
 ) -> None:
     """
     Writes:
@@ -53,16 +55,21 @@ def build_feature_partitions(
     """
     days = pd.date_range(start=start, end=end, freq="D")
     lookback = cfg.lookback_bars
+    force_days = force_days or set()
 
     for sym in symbols:
         logger.info("Features: symbol=%s", sym)
 
         for d in days:
             day = d.date().isoformat()
+
+            out_path = out_root / f"symbol={sym}" / f"date={day}" / "features.parquet"
+            if skip_existing and out_path.exists() and day not in force_days:
+                continue
+
             day_start = pd.Timestamp(day, tz="UTC")
             day_end = day_start + pd.Timedelta(days=1)
 
-            # Load enough history for rolling windows
             load_start = (day_start - pd.Timedelta(minutes=lookback)).isoformat()
             load_end = (day_end).isoformat()
 
@@ -72,17 +79,11 @@ def build_feature_partitions(
 
             feats = _compute_features_one_symbol(bars, cfg)
 
-            # Keep only rows in this day
             mask = (feats["timestamp_utc"] >= day_start) & (feats["timestamp_utc"] < day_end)
             out = feats.loc[mask].copy()
             if out.empty:
                 continue
 
-            # store keys as columns (better for scanning)
-            keep_cols = [c for c in out.columns if c not in []]
-            out = out[keep_cols]
-
-            out_path = out_root / f"symbol={sym}" / f"date={day}" / "features.parquet"
             atomic_write_parquet(out, out_path)
 
     logger.info("Features partitions complete: %s", out_root)
