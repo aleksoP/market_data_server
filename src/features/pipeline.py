@@ -1,81 +1,88 @@
 from __future__ import annotations
 
-import json
 import logging
-from dataclasses import dataclass, asdict
-from datetime import datetime, timezone
+from dataclasses import dataclass
+from datetime import timedelta
 from pathlib import Path
-from typing import Optional
 
 import pandas as pd
 
-from src.data.alignment import ensure_regular_index
-from src.data.bars_store import BarsStore
-from src.features.microstructure import add_liquidity_proxies
+from src.utils.io import atomic_write_parquet
+from src.features.technical import add_technical_features
+from src.features.microstructure import add_microstructure_features
 from src.features.return_matrix import add_lagged_returns
-from src.features.technical import add_basic_returns, add_rolling_vol, add_true_range_atr
 
 logger = logging.getLogger(__name__)
 
 
 @dataclass(frozen=True)
 class FeatureConfig:
-    freq: str = "1min"
-    vol_windows: tuple[int, ...] = (30, 60, 390)  # 30m, 1h, ~1d (US RTH) proxy
+    vol_windows: tuple[int, ...] = (30, 60, 390)
     atr_window: int = 14
-    return_lags: tuple[int, ...] = (2, 5, 10, 30, 60)
+    return_lags: tuple[int, ...] = (1, 5, 15, 30, 60)
+
+    @property
+    def lookback_bars(self) -> int:
+        return max([self.atr_window, *self.vol_windows, *self.return_lags])
 
 
-def build_feature_matrix(
-    store: BarsStore,
+def _compute_features_one_symbol(panel_sym: pd.DataFrame, cfg: FeatureConfig) -> pd.DataFrame:
+    g = panel_sym.sort_values("timestamp_utc").copy()
+
+    # Technical + microstructure
+    g = add_technical_features(g, vol_windows=list(cfg.vol_windows), atr_window=cfg.atr_window)
+    g = add_microstructure_features(g)
+    g = add_lagged_returns(g, lags=list(cfg.return_lags))
+
+    return g
+
+
+def build_feature_partitions(
+    store,
     symbols: list[str],
-    start: Optional[str] = None,
-    end: Optional[str] = None,
-    cfg: FeatureConfig = FeatureConfig(),
-    out_dir: Path = Path("data/features"),
-    name: str = "feature_matrix",
-) -> Path:
-    out_dir.mkdir(parents=True, exist_ok=True)
+    start: str,
+    end: str,
+    cfg: FeatureConfig,
+    out_root: Path = Path("data/features_1m"),
+) -> None:
+    """
+    Writes:
+      data/features_1m/symbol=XYZ/date=YYYY-MM-DD/features.parquet
 
-    panel = store.load_panel(symbols, start=start, end=end)
-    if panel.empty:
-        raise RuntimeError("No bars loaded; cannot build features.")
+    Uses lookback to compute rolling features correctly at day boundaries.
+    """
+    days = pd.date_range(start=start, end=end, freq="D")
+    lookback = cfg.lookback_bars
 
-    # Insert missing timestamps per symbol without ffill
-    panel = ensure_regular_index(panel, freq=cfg.freq)
+    for sym in symbols:
+        logger.info("Features: symbol=%s", sym)
 
-    def per_symbol(g: pd.DataFrame) -> pd.DataFrame:
-        g = add_basic_returns(g)
-        g = add_rolling_vol(g, list(cfg.vol_windows))
-        g = add_true_range_atr(g, atr_window=cfg.atr_window)
-        g = add_liquidity_proxies(g)
-        g = add_lagged_returns(g, list(cfg.return_lags))
-        return g
+        for d in days:
+            day = d.date().isoformat()
+            day_start = pd.Timestamp(day, tz="UTC")
+            day_end = day_start + pd.Timedelta(days=1)
 
-    parts = []
-    for sym, g in panel.groupby("symbol", sort=True):
-        parts.append(per_symbol(g))
-    feats = pd.concat(parts, ignore_index=True)
+            # Load enough history for rolling windows
+            load_start = (day_start - pd.Timedelta(minutes=lookback)).isoformat()
+            load_end = (day_end).isoformat()
 
-    # No leakage: everything is computed with backward-looking ops only.
-    feats = feats.sort_values(["timestamp_utc", "symbol"])
+            bars = store.load_bars(sym, start=load_start, end=load_end)
+            if bars.empty:
+                continue
 
-    # Stable index: MultiIndex [timestamp_utc, symbol]
-    feats = feats.set_index(["timestamp_utc", "symbol"]).sort_index()
+            feats = _compute_features_one_symbol(bars, cfg)
 
-    out_path = out_dir / f"{name}.parquet"
-    feats.to_parquet(out_path)
+            # Keep only rows in this day
+            mask = (feats["timestamp_utc"] >= day_start) & (feats["timestamp_utc"] < day_end)
+            out = feats.loc[mask].copy()
+            if out.empty:
+                continue
 
-    meta = {
-        "built_at_utc": datetime.now(timezone.utc).isoformat(),
-        "symbols": symbols,
-        "start": start,
-        "end": end,
-        "feature_config": asdict(cfg),
-        "rows": int(feats.shape[0]),
-        "cols": list(feats.columns),
-    }
-    (out_dir / f"{name}.metadata.json").write_text(json.dumps(meta, indent=2))
+            # store keys as columns (better for scanning)
+            keep_cols = [c for c in out.columns if c not in []]
+            out = out[keep_cols]
 
-    logger.info("Wrote feature matrix: %s (rows=%d cols=%d)", out_path, feats.shape[0], feats.shape[1])
-    return out_path
+            out_path = out_root / f"symbol={sym}" / f"date={day}" / "features.parquet"
+            atomic_write_parquet(out, out_path)
+
+    logger.info("Features partitions complete: %s", out_root)
